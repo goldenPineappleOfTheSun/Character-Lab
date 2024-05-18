@@ -43,6 +43,7 @@ public class Player : MonoBehaviour
     bool ladder = false;
     Collider ladderCollider;
     int ladderMask;
+    float sliding = 0f;
 
     float height {
         get {
@@ -52,6 +53,7 @@ public class Player : MonoBehaviour
 
     bool _groundHitCached = false;
     RaycastHit _groundHit;
+    Vector3 groundNormal;
     RaycastHit groundHit 
     {
         get {
@@ -59,7 +61,19 @@ public class Player : MonoBehaviour
             {
                 if (JumpTime() > 0.2f)
                 {
-                    Physics.SphereCast(transform.position, collider.radius, -transform.up, out _groundHit, height / 2 - collider.radius + 0.1f, groundMask);
+                    if (Physics.SphereCast(transform.position, collider.radius, -transform.up, out _groundHit, height / 2 - collider.radius + 0.1f, groundMask))
+                    {
+                        var all = Physics.SphereCastAll(transform.position, collider.radius, -transform.up, height / 2 - collider.radius + 0.1f, groundMask);
+                        foreach (var hit in all)
+                        {
+                            groundNormal = (hit.normal + groundNormal);
+                        }
+                        groundNormal.Normalize();
+                    }
+                    else
+                    {
+                        groundNormal = Vector3.up;
+                    }
                 }
                 else
                 {
@@ -92,10 +106,12 @@ public class Player : MonoBehaviour
         get {
             if (!_wallsHitCached)
             {
+                var upAmount = 0.4f;
+                var downAmount = 0f;
                 var direction = transform.rotation * Vector3.forward;
                 direction = new Vector3(direction.x, 0, direction.z) * collider.radius;
-                var start = transform.position + collider.center + Vector3.up * height * 0.4f + direction;
-                var end = transform.position + collider.center - Vector3.up * height * 0.1f + direction;
+                var start = transform.position + collider.center + Vector3.up * height * upAmount + direction;
+                var end = transform.position + collider.center - Vector3.up * height * downAmount + direction;
                 _wallsHit = Physics.CheckCapsule(start, end, collider.radius, groundMask);
                 _wallsHitCached = true;
             }
@@ -197,7 +213,7 @@ public class Player : MonoBehaviour
         var grounded = IsTouchingGround();
         var leaned = IsTouchingWall();
         var ducking = Input.GetKey(KeyCode.LeftControl) ? 0.5f : IsTouchingCeiling() ? crouch.value : 1f;
-        var canjump =  JumpTime() > 0.3f && (grounded || AirTime() < 0.2f) && ducking > 0.9f;
+        var canjump =  JumpTime() > 0.3f && (grounded || AirTime() < 0.2f) && ducking > 0.9f && sliding < 0.01f;
         var stairs = stairsHit;
         var nomove = !Input.GetKey(KeyCode.W) && !Input.GetKey(KeyCode.A) && !Input.GetKey(KeyCode.S) && !Input.GetKey(KeyCode.D); 
         var dx = 0f;
@@ -249,7 +265,7 @@ public class Player : MonoBehaviour
             Approach(move.x, null, move.z, 0.001f);
         }
 
-        if (canjump && Input.GetKeyDown(KeyCode.Space))
+        if (canjump && grounded && Input.GetKeyDown(KeyCode.Space))
         {
             Approach(null, jump, null);
             lastTimeJumped = DateTime.Now;
@@ -263,6 +279,21 @@ public class Player : MonoBehaviour
         if (nomove && grounded && !Input.GetKey(KeyCode.Space))
         {
             Approach(rb.velocity.x * breaks, rb.velocity.y * breaks, rb.velocity.z * breaks);
+        }
+
+        if (grounded && groundNormal.y < 0.7f)
+        {
+            if (sliding < 0.05f)
+            {
+                sliding += 0.0001f;
+                sliding *= 1.01f;
+            }
+            var apply = Vector3.ProjectOnPlane(new Vector3(0, Physics.gravity.y, 0), groundNormal) * sliding;
+            Apply(apply);
+        }
+        else
+        {
+            sliding *= 0.9f;
         }
 
         rb.velocity = new Vector3(
@@ -282,7 +313,19 @@ public class Player : MonoBehaviour
 
     void Ladder()
     {
+        /* bottom of the ladder */
         if (IsTouchingGround() && !Input.GetKey(KeyCode.W))
+        {
+            Movement();
+            return;
+        }
+
+        var dx = 0f;
+        var dy = 0f;
+        var top = transform.position.y - ladderCollider.ClosestPoint(transform.position).y;
+
+        /* walking on top of the ladder */
+        if (top > height / 4 && Vector3.Dot(camera.transform.forward, Vector3.down) < 0.95f)
         {
             Movement();
             return;
@@ -290,8 +333,6 @@ public class Player : MonoBehaviour
 
         rb.useGravity = false;
 
-        var dx = 0f;
-        var dy = 0f;
 
         if (Input.GetKey(KeyCode.W))
         {
@@ -320,12 +361,13 @@ public class Player : MonoBehaviour
             dy *= koeff;
         }
 
-        var top = transform.position.y - ladderCollider.ClosestPoint(transform.position).y;
+        debugText1.text = top.ToString() +" " + (height / 6).ToString();
         var df = 0f;
-        if (top > height / 4 && dy > 0)
+        if (top > height / 6 && dy > 0)
         {
             df = dy;
             dy *= 0.1f;
+            debugText1.text = df.ToString();
         }
 
         rb.velocity = transform.up * dy * climbingSpeed + transform.right * dx * climbingSpeed + transform.forward * df * climbingSpeed;
@@ -349,7 +391,6 @@ public class Player : MonoBehaviour
 
     void OnTriggerStay(Collider other)
     {
-        //debugText1.text = (transform.position.y - other.ClosestPoint(transform.position).y).ToString() + " " + (height / 2).ToString();
         if (other.gameObject.layer == ladderMask)
         {
             ladder = true;
@@ -377,6 +418,11 @@ public class Player : MonoBehaviour
         rb.velocity = new Vector3(rb.velocity.x + x, rb.velocity.y + y, rb.velocity.z + z);
     }
 
+    void Apply(Vector3 vector)
+    {
+        Apply(vector.x, vector.y, vector.z);
+    }
+
     void Approach(float? x, float? y, float? z, float smoothness = 1)
     {
         var target = new Vector3(x ?? rb.velocity.x, y ?? rb.velocity.y, z ?? rb.velocity.z);
@@ -385,6 +431,11 @@ public class Player : MonoBehaviour
             rb.velocity.y + (target.y - rb.velocity.y) * smoothness, 
             rb.velocity.z + (target.z - rb.velocity.z) * smoothness
         );
+    }
+
+    void Approach(Vector3 vector, float smoothness = 1)
+    {
+        Approach(vector.x, vector.y, vector.z, smoothness   );
     }
 
     bool IsTouchingGround()
